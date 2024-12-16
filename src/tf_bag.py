@@ -260,7 +260,7 @@ class BagTfTransformer(object):
         first_update_time = self.waitForTransform(orig_frame, dest_frame, start_time=start_time)
         return (t for t in BagTfTransformer._getTimeFromTransforms(updates) if t > first_update_time)
 
-    def waitForTransform(self, orig_frame, dest_frame, start_time=None):
+    def waitForTransform(self, orig_frame, dest_frame, start_time=None, duration=None):
         """
         Returns the first time for which at least a tf message is available for the whole chain between \
         the two provided frames
@@ -292,7 +292,7 @@ class BagTfTransformer(object):
             raise ValueError('Transform not found between {} and {}'.format(orig_frame, dest_frame))
         return ret
 
-    def lookupTransform(self, orig_frame, dest_frame, time):
+    def lookupTransform(self, orig_frame, dest_frame, time, latest=False):
         """
         Returns the transform between the two provided frames at the given time
 
@@ -304,12 +304,19 @@ class BagTfTransformer(object):
         if orig_frame == dest_frame:
             return (0, 0, 0), (0, 0, 0, 1)
 
+        if latest:
+            try:
+                time = self.tf_static_messages[0].header.stamp
+            except:
+                time = self.getStartTime()
+
         self.populateTransformerAtTime(time)
         try:
             common_time = self.transformer.getLatestCommonTime(orig_frame, dest_frame)
         except:
-            raise RuntimeError('Could not find the transformation {} -> {} in the 10 seconds before time {}'
+            print('Could not find the transformation {} -> {} in the 10 seconds before time {}'
                                .format(orig_frame, dest_frame, time))
+            return (None,None)
 
         return self.transformer.lookupTransform(orig_frame, dest_frame, common_time)
 
