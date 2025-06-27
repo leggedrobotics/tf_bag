@@ -337,19 +337,29 @@ class BagTfTransformer(object):
             # Here we use the orig_frame to look all transforms.
             # Current implementation is brittle and may fail in different settings when more odom sources are published.
 
-            dt = 0.2
+            dt = 1.0
             pre = time - rospy.Duration(dt)
             post = time + rospy.Duration(dt)
             res = [
                 f for f in self.getTransformMessagesWithFrame(orig_frame, start_time=pre, end_time=post, reverse=False)
             ]
+            print("Res length", len(res))
             after_msg = None
+            before_msg = None
             for msg in res:
                 if msg.header.stamp <= time:
                     before_msg = msg
                 elif msg.header.stamp > time and after_msg is None:
                     after_msg = msg
                     break
+
+            if before_msg is None:
+                print('There was no tf published before the requested time {} for the transform {} -> {}'
+                                .format(time, orig_frame, dest_frame))
+                if return_se3:
+                    return None
+                return (None,None)
+
             res = [before_msg, after_msg]
 
             # Get the two transforms
@@ -393,7 +403,7 @@ class BagTfTransformer(object):
 
         elif method == "interpolate_odom_frame":
             # Very inefficent way to fetch the previous world frame transform
-            dt = 0.2
+            dt = 1.0
 
             pre = time - rospy.Duration(dt)
             post = time + rospy.Duration(dt)
