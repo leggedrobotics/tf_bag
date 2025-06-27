@@ -12,7 +12,15 @@ import rospy
 import tf
 from std_msgs.msg import Header
 from geometry_msgs.msg import TransformStamped, Transform, Vector3, Quaternion
+from scipy.spatial.transform import Rotation as R, Slerp
+from scipy.interpolate import interp1d
 
+
+def transform_to_matrix(trans, quat):
+    matrix = np.eye(4)
+    matrix[:3, :3] = R.from_quat(quat).as_dcm()
+    matrix[:3, 3] = trans
+    return matrix
 
 class BagTfTransformer(object):
     """
@@ -292,7 +300,7 @@ class BagTfTransformer(object):
             raise ValueError('Transform not found between {} and {}'.format(orig_frame, dest_frame))
         return ret
 
-    def lookupTransform(self, orig_frame, dest_frame, time, latest=False):
+    def lookupTransform(self, orig_frame, dest_frame, time, latest=False, method="simple", odom_world=None, odom_body=None, return_se3=False):
         """
         Returns the transform between the two provided frames at the given time
 
@@ -311,14 +319,125 @@ class BagTfTransformer(object):
                 time = self.getStartTime()
 
         self.populateTransformerAtTime(time)
-        try:
-            common_time = self.transformer.getLatestCommonTime(orig_frame, dest_frame)
-        except:
-            print('Could not find the transformation {} -> {} in the 10 seconds before time {}'
-                               .format(orig_frame, dest_frame, time))
-            return (None,None)
 
-        return self.transformer.lookupTransform(orig_frame, dest_frame, common_time)
+
+        if method == "simple":
+            try:
+                common_time = self.transformer.getLatestCommonTime(orig_frame, dest_frame)
+            except:
+                print('Could not find the transformation {} -> {} in the 10 seconds before time {}'
+                                .format(orig_frame, dest_frame, time))
+                if return_se3:
+                    return None
+                return (None,None)
+
+            res = self.transformer.lookupTransform(orig_frame, dest_frame, common_time)
+
+        elif method == "interpolate_linear":
+            # Here we use the orig_frame to look all transforms.
+            # Current implementation is brittle and may fail in different settings when more odom sources are published.
+
+            dt = 0.2
+            pre = time - rospy.Duration(dt)
+            post = time + rospy.Duration(dt)
+            res = [
+                f for f in self.getTransformMessagesWithFrame(orig_frame, start_time=pre, end_time=post, reverse=False)
+            ]
+            after_msg = None
+            for msg in res:
+                if msg.header.stamp <= time:
+                    before_msg = msg
+                elif msg.header.stamp > time and after_msg is None:
+                    after_msg = msg
+                    break
+            res = [before_msg, after_msg]
+
+            # Get the two transforms
+            tf1 = self.transformer.lookupTransform(orig_frame, dest_frame, res[0].header.stamp)
+            tf2 = self.transformer.lookupTransform(orig_frame, dest_frame, res[1].header.stamp)
+
+            # Extract timestamps - deleting the d for numerical stabiltiy but not needed
+            d = rospy.Duration(res[0].header.stamp.secs)
+            t1 = (res[0].header.stamp - d).to_sec()
+            t2 = (res[1].header.stamp - d).to_sec()
+            target_time = (time - d).to_sec()
+
+            # Extract translations and rotations from transforms
+            trans1 = np.array(tf1[0])
+            trans2 = np.array(tf2[0])
+
+            quat1 = np.array(tf1[1])
+            quat2 = np.array(tf2[1])
+
+            # Create arrays for interpolation
+            timestamps = np.array([t1, t2])
+            rotations = R.from_quat([quat1, quat2])
+            translations = np.array([trans1, trans2])
+
+            # SLERP interpolation for rotations
+            slerp_interpolator = Slerp(timestamps, rotations)
+            interpolated_rotation = slerp_interpolator([target_time])
+
+            # Linear interpolation for translations
+            translation_interpolator = interp1d(
+                timestamps,
+                translations,
+                kind="linear",
+                axis=0,
+                bounds_error=False,
+                fill_value=(trans1, trans2),  # Clamp to boundary values
+            )
+            interpolated_translation = translation_interpolator([target_time])[0]
+            interpolated_quat = interpolated_rotation.as_quat()
+            res = (interpolated_translation, interpolated_quat)
+
+        elif method == "interpolate_odom_frame":
+            # Very inefficent way to fetch the previous world frame transform
+            dt = 0.2
+
+            pre = time - rospy.Duration(dt)
+            post = time + rospy.Duration(dt)
+            res = [
+                f for f in self.getTransformMessagesWithFrame(orig_frame, start_time=pre, end_time=post, reverse=False)
+            ]
+            after_msg = None
+            for msg in res:
+                if msg.header.stamp <= time:
+                    before_msg = msg
+                elif msg.header.stamp > time and after_msg is None:
+                    after_msg = msg
+                    break
+
+            res = [before_msg, after_msg]
+
+            # Get the transform available from previous orig_frame - assumes then the odom topic is available at high frequency
+            tf1 = self.transformer.lookupTransform(orig_frame, dest_frame, res[0].header.stamp)
+            interpol_odom_start = self.transformer.lookupTransform(odom_body, odom_world, res[0].header.stamp)
+            interpol_odom_dest = self.transformer.lookupTransform(odom_body, odom_world, time)
+
+            odom_start_matrix = transform_to_matrix(interpol_odom_start[0], interpol_odom_start[1])
+            odom_dest_matrix = transform_to_matrix(interpol_odom_dest[0], interpol_odom_dest[1])
+
+            # Compute the relative transform from start to dest
+            odom_relative_matrix = np.linalg.inv(odom_start_matrix) @ odom_dest_matrix
+
+            # Convert tf1 to matrix
+            tf1_matrix = transform_to_matrix(tf1[0], tf1[1])
+
+            # Apply the relative odom transform to tf1
+            tf1_corrected_matrix = tf1_matrix @ odom_relative_matrix
+
+            # Convert back to (trans, quat) format
+            tf1_corrected_trans = tf1_corrected_matrix[:3, 3]
+            tf1_corrected_quat = R.from_dcm(tf1_corrected_matrix[:3, :3]).as_quat()
+
+            # Update tf1 with corrected values
+            res = (tf1_corrected_trans, tf1_corrected_quat)
+
+
+        if return_se3:
+            return transform_to_matrix(res[0], res[1])
+        return res
 
     def lookupTransformWhenTransformUpdates(self, orig_frame, dest_frame,
                                             trigger_orig_frame=None, trigger_dest_frame=None,
