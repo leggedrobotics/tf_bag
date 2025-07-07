@@ -80,7 +80,7 @@ class BagTfTransformer(object):
         ret = (self.tf_messages[i] for i in indices_in_range[0])
         return ret
 
-    def populateTransformerAtTime(self, target_time, buffer_length=10, lookahead=0.1):
+    def populateTransformerAtTime(self, target_time, buffer_length=20, lookahead=0.2):
         """
         Fills the buffer of the internal tf Transformer with the messages preceeding the given time
 
@@ -146,7 +146,8 @@ class BagTfTransformer(object):
         :param reverse: if True, the messages will be provided in reversed order
         :return: an iterator over the messages respecting the criteria
         """
-        for m in self._filterMessages(start_time=start_time, end_time=end_time, reverse=reverse):
+        tf_messages_in_interval = self.getMessagesInTimeRange(start_time, end_time)
+        for m in tf_messages_in_interval:
             if m.header.frame_id == frame or m.child_frame_id == frame:
                 yield m
 
@@ -340,13 +341,14 @@ class BagTfTransformer(object):
             dt = 1.0
             pre = time - rospy.Duration(dt)
             post = time + rospy.Duration(dt)
-            res = [
+            messages = [
                 f for f in self.getTransformMessagesWithFrame(orig_frame, start_time=pre, end_time=post, reverse=False)
             ]
-            print("Res length", len(res))
+
             after_msg = None
             before_msg = None
-            for msg in res:
+
+            for msg in messages:
                 if msg.header.stamp <= time:
                     before_msg = msg
                 elif msg.header.stamp > time and after_msg is None:
@@ -362,6 +364,7 @@ class BagTfTransformer(object):
 
             res = [before_msg, after_msg]
 
+        
             # Get the two transforms
             tf1 = self.transformer.lookupTransform(orig_frame, dest_frame, res[0].header.stamp)
             tf2 = self.transformer.lookupTransform(orig_frame, dest_frame, res[1].header.stamp)
@@ -443,7 +446,8 @@ class BagTfTransformer(object):
 
             # Update tf1 with corrected values
             res = (tf1_corrected_trans, tf1_corrected_quat)
-
+        else: 
+            raise ValueError(f'Unknown method for transform lookup: {method}')
 
         if return_se3:
             return transform_to_matrix(res[0], res[1])
@@ -677,3 +681,21 @@ class BagTfTransformer(object):
                 ax = fig.add_subplot(111)
             ax.plot(translation_data[:, 0], translation_data[:, 1], color=color)
             return ax, fig
+
+
+if __name__ == "__main__":
+    from pytictac import CpuTimer
+    tf_listener = BagTfTransformer('/tmp_disk/2024-11-04-10-57-34_nerfstudio/2024-11-04-10-57-34_tf_minimal.bag')
+    t = rospy.Time()
+    t.nsecs = 148593281
+    t.secs = 1730714266
+
+    with CpuTimer('lookupTransform 1'):
+        # Example usage of the lookupTransform method
+        trans, quat_xyzw = tf_listener.lookupTransform( "dlio_map", "hdr_front", t , method="interpolate_linear", odom_world="odom", odom_body="base")
+    
+    with CpuTimer('lookupTransform 2'):
+        # Example usage of the lookupTransform method
+        trans, quat_xyzw = tf_listener.lookupTransform( "dlio_map", "hdr_front", t , method="interpolate_linear", odom_world="odom", odom_body="base")
+
+    print("finished test")
